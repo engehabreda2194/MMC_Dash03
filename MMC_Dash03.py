@@ -623,9 +623,10 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	REJECTED_CODE = "QREJECTC"
 
 	open_mask = status_series.isin(OPEN_CODES)
-	# Completed WOs should count ONLY rows with Status == COMP (per request)
+	# Completed WOs count ONLY rows with Status == COMP (per earlier request)
 	completed_mask = status_series.eq("COMP")
 	closed_mask = status_series.eq(CLOSED_CODE)
+	schedcomp_mask = status_series.eq("SCHEDCOMP")
 	rejected_mask = status_series.eq(REJECTED_CODE)
 
 	# Work type distribution (PM, CM, ADW)
@@ -681,8 +682,9 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	else:
 		pct_on_time = None
 
-	# Completion Rate = Completed (COMP only) over total
-	completion_rate = 100 * (completed_mask.sum() / max(1, total))
+	# Completion Rate = share of (COMP + CLOSE + SCHEDCOMP) out of total (per latest request)
+	completion_rate_mask = completed_mask | closed_mask | schedcomp_mask
+	completion_rate = 100 * (completion_rate_mask.sum() / max(1, total))
 	# Backlog Rate (open over total)
 	backlog_rate = 100 * (open_mask.sum() / max(1, total))
 	# Rework Rate (QREJECTC over total)
@@ -736,7 +738,8 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	done_mask = pd.Series([False] * total)
 	if status_col is not None:
 		su = df[status_col].astype(str).str.upper().str.strip()
-		done_mask = su.isin(DONE_STATUS_VALUES)  # completed or closed (codes or words, incl. Arabic)
+		# For completion rate, count COMP, CLOSE, and SCHEDCOMP per latest instruction
+		done_mask = su.isin({"COMP", "CLOSE", "SCHEDCOMP"})
 	done_n = int(done_mask.sum())
 	out["completion_rate"] = 100 * (done_n / max(1, total))
 
@@ -1800,7 +1803,7 @@ def page_kpis(df: pd.DataFrame, updated_at: Optional[datetime]) -> None:
 
 	completion = [
 		{"key":"completion_rate", "label":"Completion Rate", "value": kpis.get("completion_rate"), "unit":"%", "icon":"📈",
-		 "tip":"Completed / (Completed + Open). Target ≥ 90%"},
+		 "tip":"Share of COMP + CLOSE + SCHEDCOMP out of total. Target ≥ 90%"},
 		{"key":"on_time_rate", "label":"On-Time Rate", "value": kpis.get("pct_on_time"), "unit":"%", "icon":"⏱️",
 		 "tip":"Completed on or before target date. Target ≥ 90%"},
 		{"key":"avg_completion", "label":"Avg Completion", "value": kpis.get("avg_days"), "unit":"d", "icon":"🕰️",
@@ -1827,7 +1830,7 @@ def page_kpis(df: pd.DataFrame, updated_at: Optional[datetime]) -> None:
 		{"key":"", "label":"Total WOs (Svc)", "value": ins.get("total_wos"), "unit":"int", "icon":"🧰",
 		 "tip":"Total service-provider work orders in scope."},
 		{"key":"completion_rate", "label":"Completion Rate", "value": ins.get("completion_rate"), "unit":"%", "icon":"📈",
-		 "tip":"Provider completion rate; target ≥ 90%."},
+		 "tip":"Provider rate counting COMP + CLOSE + SCHEDCOMP; target ≥ 90%."},
 		{"key":"on_time_rate", "label":"On-Time (valid)", "value": ins.get("on_time_rate"), "unit":"%", "icon":"⏱️",
 		 "tip":"On-time only where target dates exist."},
 		{"key":"", "label":"MoM Completed", "value": ins.get("mom_change"), "unit":"pct1", "icon":"📅",
