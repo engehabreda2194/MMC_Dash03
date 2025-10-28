@@ -1,16 +1,29 @@
+# Streamlit
 streamlit==1.28.0
+
+# Data manipulation
 pandas>=2.1
 numpy>=1.26
+
+# Excel support
 openpyxl==3.1.0
+
+# Visualization
 plotly==5.16.0
 matplotlib==3.8.0
-seaborn==0.12.3
+seaborn>=0.13
+
+# Web requests
 requests==2.31.0
+
+# Google Sheets integration
 gspread==5.9.0
 oauth2client==4.1.3
+
+# Utilities
 python-dateutil==2.9.2
 pytz==2025.10
-rich==14.2.0
+rich<14
 markdown-it-py==4.0.0
 mdurl==0.1.2
 pyyaml==6.0
