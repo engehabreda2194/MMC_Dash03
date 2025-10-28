@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import base64
 from typing import Optional, Tuple, Dict, Any, List
 from textwrap import dedent
@@ -49,6 +50,29 @@ TEXT = "#000000"         # Black
 # Default logo URLs (use raw GitHub links for direct image serving)
 arsal_logo_url = "https://raw.githubusercontent.com/engehabreda2194/MMC_Dash03/17a50cdb1bafd2cd11839c24b0f2a65ec7509b22/ARSAL%20Logo.png"
 client_logo_url = "https://raw.githubusercontent.com/engehabreda2194/MMC_Dash03/17a50cdb1bafd2cd11839c24b0f2a65ec7509b22/MMC%20Logo.jpg"
+
+# -------------------------
+# Timezone helpers
+# -------------------------
+def _get_tz_name() -> str:
+	# Read preferred timezone from secrets/env; default to Saudi Arabia
+	tz = get_secret_env("MMC_TZ", "Asia/Riyadh")
+	return tz or "Asia/Riyadh"
+
+def _get_zoneinfo(tz_name: str) -> timezone | ZoneInfo:
+	try:
+		return ZoneInfo(tz_name)
+	except Exception:
+		# Fallback to fixed UTC+3 if ZoneInfo not available
+		return timezone(timedelta(hours=3))
+
+def now_local() -> datetime:
+	tz = _get_zoneinfo(_get_tz_name())
+	return datetime.now(tz)
+
+def now_local_naive() -> datetime:
+	# Use local wall clock time but naive for compatibility with tz-naive columns
+	return now_local().replace(tzinfo=None)
 def get_secret_env(key: str, default: Optional[str] = None) -> Optional[str]:
 	"""Read a config value from st.secrets first, then environment variables.
 
@@ -283,7 +307,8 @@ def inject_brand_css() -> None:
 def brand_header() -> None:
 	"""Top header with Aarsal logo (left), centered title, and Client logo (right)."""
 	# Current date & time (local)
-	now_str = datetime.now().strftime("%a, %d %b %Y – %H:%M")
+	# Localized current date & time
+	now_str = now_local().strftime("%a, %d %b %Y – %H:%M %Z")
 	left_src = _resolve_logo_src(
 		default_url=arsal_logo_url,
 		env_key="MMC_ARSAL_LOGO",
@@ -396,7 +421,8 @@ def load_data(url: str) -> Tuple[pd.DataFrame, datetime]:
 		if col in df.columns:
 			df[col] = _parse_dates_safely(df[col])
 
-	return df, datetime.now()
+	# Use localized 'now' for last-updated
+	return df, now_local()
 
 
 def clear_cache_and_rerun():
@@ -411,7 +437,7 @@ def clear_cache_and_rerun():
 
 def make_sample_data() -> pd.DataFrame:
 	"""Fallback sample dataset for TV demo when data URL is unavailable."""
-	now = datetime.now()
+	now = now_local_naive()
 	data = {
 		"Status": [
 			"WPLAN", "PLANCOMP", "WQAPPRC", "QAPPRC", "WSCH", "SCHEDCOMP",
@@ -735,7 +761,9 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	if target is not None and status_col2 is not None:
 		su4 = df[status_col2].astype(str).str.upper()
 		is_open = su4.isin(OPEN_CODES)
-		overdue_open = is_open & target.notna() & (target < pd.Timestamp.now())
+		# Compare against local 'now' as naive to match tz-naive columns
+		_now_n = pd.Timestamp(now_local_naive())
+		overdue_open = is_open & target.notna() & (target < _now_n)
 		out["overdue_open_rate"] = 100 * (overdue_open.sum() / max(1, is_open.sum())) if is_open.any() else None
 	else:
 		out["overdue_open_rate"] = None
@@ -745,7 +773,8 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	if reported is not None and status_col2 is not None:
 		su5 = df[status_col2].astype(str).str.upper()
 		is_open = su5.isin(OPEN_CODES)
-		ages = (pd.Timestamp.now() - reported[is_open]).dt.total_seconds() / 86400
+		_now_n2 = pd.Timestamp(now_local_naive())
+		ages = (_now_n2 - reported[is_open]).dt.total_seconds() / 86400
 		out["avg_backlog_age"] = float(ages.mean()) if is_open.any() else None
 	else:
 		out["avg_backlog_age"] = None
@@ -1455,7 +1484,7 @@ def main() -> None:
 	if error:
 		st.warning("Using sample data (failed to load fixed data URL). Configure MMC_DATA_URL env var or update FIXED_DATA_URL in code.")
 		df = make_sample_data()
-		updated_at = datetime.now()
+		updated_at = now_local()
 
 	if df is None:
 		return
