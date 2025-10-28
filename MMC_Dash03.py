@@ -220,6 +220,51 @@ COLOR_SEQ = (
 )
 ORANGE_SEQ = ["#FF6B00", "#FF8C33", "#FFB366", "#FFD1A3"]
 
+# -------------------------
+# Column detection helpers (robust to casing/spacing and basic Arabic synonyms)
+# -------------------------
+def _colkey(s: str) -> str:
+	try:
+		s = str(s)
+	except Exception:
+		return ""
+	return "".join(ch for ch in s.lower() if ch.isalnum())
+
+def _columns_map(df: pd.DataFrame) -> Dict[str, str]:
+	return {_colkey(c): c for c in df.columns}
+
+def find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+	cmap = _columns_map(df)
+	for cand in candidates:
+		k = _colkey(cand)
+		if k in cmap:
+			return cmap[k]
+	return None
+
+# Common column name variants (English + Arabic basics)
+STATUS_COLS = ["Status", "STATUS", "status", "الحالة"]
+LOCATION_COLS = ["Location", "Site/Location", "Site", "الموقع", "المكان", "الموقع/المكان"]
+PLANNER_COLS = ["Planner Name", "Planner", "المخطط", "اسم المخطط", "منسق الصيانة"]
+DATE_REPORTED_COLS = [
+	"Reported Date", "Create Date", "Created Date",
+	"تاريخ البلاغ", "تاريخ الابلاغ", "تاريخ الإبلاغ", "تاريخ الانشاء", "تاريخ الإنشاء", "تاريخ الطلب"
+]
+TARGET_DATE_COLS = ["Target Date", "SLA Date", "تاريخ الاستحقاق", "تاريخ الهدف", "تاريخ الاستهداف", "تاريخ الانتهاء المخطط"]
+COMPLETION_DATE_COLS = [
+	"Completion Date", "Actual Finish", "Finish Date", "Actual Finish Date", "Actual End", "End Date",
+	"Close Date", "Closed Date", "Date Closed", "Date Completed", "Completion",
+	"تاريخ الاغلاق", "تاريخ الإغلاق", "تاريخ الاكمال", "تاريخ الإكمال", "تاريخ الانتهاء"
+]
+CATEGORY_COLS = ["Work Category", "Category", "فئة العمل", "التصنيف", "نوع الفئة"]
+TYPE_COLS = ["Work Type", "Type", "WORKTYPE", "worktype", "نوع العمل", "النوع"]
+PRIORITY_COLS = ["Priority", "PRIORITY", "priority", "PRIORITY CODE", "PRIORITYCODE", "أولوية", "رمز الاولوية", "رمز الأولوية"]
+
+# Recognize completed/closed statuses (English + Arabic basics)
+DONE_STATUS_VALUES = {
+	"COMP", "CLOSE", "COMPLETED", "CLOSED",
+	"تم", "مغلق", "مكتمل", "اغلاق", "إغلاق"
+}
+
 # Fixed OneDrive/SharePoint CSV direct link (update this to your public CSV download URL)
 # Example patterns:
 # - SharePoint: https://<tenant>.sharepoint.com/.../download.aspx?share=...
@@ -228,7 +273,7 @@ ORANGE_SEQ = ["#FF6B00", "#FF8C33", "#FFB366", "#FFD1A3"]
 FIXED_DATA_URL = get_secret_env(
 	"MMC_DATA_URL",
 	# Default to your Google Sheets link; loader will convert it to CSV export automatically
-	"https://docs.google.com/spreadsheets/d/1T6dndJHd33ZW3i4e9LIOGl1BPkxDsYme/edit?usp=sharing&ouid=115201289744778991707&rtpof=true&sd=true",
+	"https://docs.google.com/spreadsheets/d/1WH8r3YJAgh5w6_31zTiwbN18Az7ltHm7/edit?usp=sharing&ouid=106178283752225669501&rtpof=true&sd=true",
 )
 
 
@@ -265,11 +310,11 @@ def inject_brand_css() -> None:
 		.brand-left {{ text-align: left; }}
 		.brand-center {{ text-align: center; }}
 		.brand-right {{ text-align: right; }}
-		.brand-subtitle {{ margin: 4px 0 0 0; color:#555; font-size:14px; font-weight:600; }}
+		.brand-subtitle {{ margin: 0; color:#555; font-size:14px; font-weight:600; }}
 		/* Keep title on one line and consistent size across tabs */
 		.brand-center h3 {{
 			font-size: 38px;
-			line-height: 1.2;
+			line-height: 1.0; /* tighter to reduce gap to subtitle */
 			margin: 0;
 			white-space: nowrap;
 		}}
@@ -519,21 +564,22 @@ def parse_excel_bytes(content: bytes) -> pd.DataFrame:
 # -------------------------
 
 def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
-	"""Compute KPIs using the specified status mapping and rules.
+	"""Compute KPIs with explicit business status semantics.
 
-	Status mapping:
-	- WPLAN: Open – not yet acted on
-	- PLANCOMP: With procurement
-	- WQAPPRC: Waiting client quotation approval
-	- QREJECTC: Rejected by client
-	- QAPPRC: Client approved (waiting execution)
-	- WSCH: Materials delivered / service executed (waiting completion confirmation)
-	- SCHEDCOMP: Work executed, pending invoices/docs
-	- COMP: Fully completed
-	- CAN: Cancelled – exclude from all stats
+	Status meanings (as requested):
+	- WPLAN: Open, no action taken yet.
+	- PLANCOMP: With procurement; waiting materials or external contractor.
+	- WQAPPRC: Quotation sent to client and awaiting approval.
+	- QREJECTC: Client rejected the quotation (rework/iteration needed).
+	- QAPPRC: Client approved; waiting execution by team.
+	- WSCH: Materials delivered or service executed; awaiting final confirmation.
+	- SCHEDCOMP: Work executed; pending documents/invoices.
+	- COMP: Work fully done and documents complete; ready to invoice client.
+	- CLOSE: Invoiced to client and work order fully closed (final stage).
+	- CAN: Cancelled – excluded globally.
 	"""
 	# Normalize status column
-	status_col = next((c for c in ["Status", "STATUS", "status"] if c in df.columns), None)
+	status_col = find_col(df, STATUS_COLS)
 	if status_col is not None:
 		status_series = df[status_col].astype(str).str.upper().str.strip()
 		# Common synonyms/variants
@@ -551,14 +597,14 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 
 	# Exclude cancelled and 'Contract' category from all KPIs, and exclude Location == 'MMC-ARSAL'
 	not_cancelled = ~(status_series == "CAN")
-	cat_col = next((c for c in ["Work Category", "Category"] if c in df.columns), None)
+	cat_col = find_col(df, CATEGORY_COLS)
 	if cat_col is not None:
 		cat_series = df[cat_col].astype(str).str.upper().str.strip()
 		not_contract = ~(cat_series == "CONTRACT")
 	else:
 		not_contract = pd.Series([True] * len(df))
 
-	loc_col = next((c for c in ["Location", "Site/Location", "Site"] if c in df.columns), None)
+	loc_col = find_col(df, LOCATION_COLS)
 	if loc_col is not None:
 		loc_series = df[loc_col].astype(str).str.upper().str.strip()
 		not_mmc_arsal = ~(loc_series == "MMC-ARSAL")
@@ -572,17 +618,18 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	total = len(dfx)
 
 	OPEN_CODES = {"WPLAN", "PLANCOMP", "WQAPPRC", "QAPPRC", "WSCH", "SCHEDCOMP"}
-	COMPLETED_CODE = "COMP"
+	DONE_CODES = {"COMP", "CLOSE"}
 	CLOSED_CODE = "CLOSE"
 	REJECTED_CODE = "QREJECTC"
 
 	open_mask = status_series.isin(OPEN_CODES)
-	completed_mask = status_series.eq(COMPLETED_CODE)
+	# Completed WOs should count ONLY rows with Status == COMP (per request)
+	completed_mask = status_series.eq("COMP")
 	closed_mask = status_series.eq(CLOSED_CODE)
 	rejected_mask = status_series.eq(REJECTED_CODE)
 
 	# Work type distribution (PM, CM, ADW)
-	wt_col = next((c for c in ["Work Type", "Type", "WORKTYPE", "worktype"] if c in dfx.columns), None)
+	wt_col = find_col(dfx, TYPE_COLS)
 	if wt_col:
 		wt_upper = dfx[wt_col].astype(str).str.upper()
 		pm_mask = wt_upper.str.contains("PM", na=False)
@@ -607,19 +654,25 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	cm_pct_pc = 100 - pm_pct_pc
 
 	# Avg completion time
-	if "Reported Date" in dfx.columns:
-		reported = dfx["Reported Date"]
-	elif "Created Date" in dfx.columns:
-		reported = dfx["Created Date"]
+	# Robust date detection (reported/create)
+	rep_col = find_col(dfx, DATE_REPORTED_COLS)
+	if rep_col:
+		reported = pd.to_datetime(dfx[rep_col], errors="coerce")
 	else:
 		reported = pd.Series([pd.NaT] * total)
 
-	completion = dfx.get("Completion Date", dfx.get("Actual Finish", pd.Series([pd.NaT] * total)))
+	# Robust completion date detection (completion/close/finish)
+	comp_col = find_col(dfx, COMPLETION_DATE_COLS)
+	if comp_col:
+		completion = pd.to_datetime(dfx[comp_col], errors="coerce")
+	else:
+		completion = pd.Series([pd.NaT] * total)
 	valid = reported.notna() & completion.notna()
 	avg_days = (completion[valid] - reported[valid]).dt.total_seconds().mean() / 86400 if valid.any() else None
 
 	# % Closed on time (if Target Date exists)
-	target = dfx.get("Target Date")
+	tgt_col = find_col(dfx, TARGET_DATE_COLS)
+	target = pd.to_datetime(dfx[tgt_col], errors="coerce") if tgt_col else None
 	if target is not None and completion is not None:
 		on_time_mask = completion.notna() & target.notna() & (completion <= target)
 		# Denominator: completed with valid target+completion
@@ -628,7 +681,7 @@ def compute_kpis(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	else:
 		pct_on_time = None
 
-	# Completion Rate (completed over total, excluding cancelled already)
+	# Completion Rate = Completed (COMP only) over total
 	completion_rate = 100 * (completed_mask.sum() / max(1, total))
 	# Backlog Rate (open over total)
 	backlog_rate = 100 * (open_mask.sum() / max(1, total))
@@ -679,17 +732,19 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	out: Dict[str, Optional[float]] = {}
 	total = len(df)
 
-	status_col = next((c for c in ["Status", "STATUS", "status"] if c in df.columns), None)
+	status_col = find_col(df, STATUS_COLS)
 	done_mask = pd.Series([False] * total)
 	if status_col is not None:
-		su = df[status_col].astype(str).str.upper()
-		done_mask = su.isin(["COMP", "CLOSE"])  # completed or closed
+		su = df[status_col].astype(str).str.upper().str.strip()
+		done_mask = su.isin(DONE_STATUS_VALUES)  # completed or closed (codes or words, incl. Arabic)
 	done_n = int(done_mask.sum())
 	out["completion_rate"] = 100 * (done_n / max(1, total))
 
 	# On-time among those with both dates
-	target = pd.to_datetime(df.get("Target Date"), errors="coerce") if "Target Date" in df.columns else None
-	completion = pd.to_datetime(df.get("Completion Date"), errors="coerce") if "Completion Date" in df.columns else None
+	tgt_col = find_col(df, TARGET_DATE_COLS)
+	comp_col = find_col(df, COMPLETION_DATE_COLS)
+	target = pd.to_datetime(df.get(tgt_col), errors="coerce") if tgt_col else None
+	completion = pd.to_datetime(df.get(comp_col), errors="coerce") if comp_col else None
 	if target is not None and completion is not None:
 		valid = completion.notna() & target.notna()
 		on_time = (completion <= target) & valid
@@ -721,8 +776,8 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 		out["last_month"] = None
 
 	# Top category and planner
-	cat_col = next((c for c in ["Work Category", "Category"] if c in df.columns), None)
-	plan_col = next((c for c in ["Planner Name", "Planner"] if c in df.columns), None)
+	cat_col = find_col(df, CATEGORY_COLS)
+	plan_col = find_col(df, PLANNER_COLS)
 	try:
 		out["top_category"] = (
 			df[cat_col].astype(str).value_counts().idxmax() if cat_col else None
@@ -741,7 +796,7 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 
 	# Additional KPIs for provider performance
 	# Rework proxy using QREJECTC presence
-	status_col2 = next((c for c in ["Status", "STATUS", "status"] if c in df.columns), None)
+	status_col2 = find_col(df, STATUS_COLS)
 	rework_n = 0
 	if status_col2 is not None:
 		su2 = df[status_col2].astype(str).str.upper()
@@ -757,7 +812,7 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	out["backlog_rate"] = 100 * (open_n / max(1, total))
 
 	# Overdue open rate (Target passed and not completed)
-	target = pd.to_datetime(df.get("Target Date"), errors="coerce") if "Target Date" in df.columns else None
+	target = pd.to_datetime(df.get(tgt_col), errors="coerce") if tgt_col else None
 	if target is not None and status_col2 is not None:
 		su4 = df[status_col2].astype(str).str.upper()
 		is_open = su4.isin(OPEN_CODES)
@@ -769,7 +824,8 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 		out["overdue_open_rate"] = None
 
 	# Average backlog age (days) for open items
-	reported = pd.to_datetime(df.get("Reported Date"), errors="coerce") if "Reported Date" in df.columns else None
+	rep_col = find_col(df, DATE_REPORTED_COLS)
+	reported = pd.to_datetime(df.get(rep_col), errors="coerce") if rep_col else None
 	if reported is not None and status_col2 is not None:
 		su5 = df[status_col2].astype(str).str.upper()
 		is_open = su5.isin(OPEN_CODES)
@@ -788,7 +844,7 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 		out["sla_breach_rate"] = None
 
 	# PM compliance (PM Completed on time / PM Completed with target)
-	wt_col = next((c for c in ["Work Type", "Type", "WORKTYPE", "worktype"] if c in df.columns), None)
+	wt_col = find_col(df, TYPE_COLS)
 	if wt_col is not None and target is not None and completion is not None:
 		wt_u = df[wt_col].astype(str).str.upper()
 		is_pm = wt_u.str.contains("PM", na=False)
@@ -801,6 +857,215 @@ def compute_insights(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 	# First-Time Fix Rate (approx) = 100 - rework_rate
 	out["ftfr"] = 100 - (out["rework_rate"] or 0)
 	return out
+
+
+# -------------------------
+# Advanced analytics helpers (new)
+# -------------------------
+
+def _open_mask(df: pd.DataFrame) -> pd.Series:
+	status_col = find_col(df, STATUS_COLS)
+	if status_col is None:
+		return pd.Series([False] * len(df))
+	su = df[status_col].astype(str).str.upper().str.strip()
+	OPEN_CODES = {"WPLAN", "PLANCOMP", "WQAPPRC", "QAPPRC", "WSCH", "SCHEDCOMP"}
+	return su.isin(OPEN_CODES)
+
+def _reported_series(df: pd.DataFrame) -> pd.Series:
+	rep_col = find_col(df, DATE_REPORTED_COLS)
+	if rep_col:
+		return pd.to_datetime(df[rep_col], errors="coerce")
+	# fallback to Created/Status if exists
+	for c in ["Created Date", "Create Date", "Status Date", "Last Modified", "Change Date"]:
+		col = find_col(df, [c])
+		if col:
+			return pd.to_datetime(df[col], errors="coerce")
+	return pd.Series([pd.NaT] * len(df))
+
+def _completion_series(df: pd.DataFrame) -> pd.Series:
+	comp_col = find_col(df, COMPLETION_DATE_COLS)
+	if comp_col:
+		return pd.to_datetime(df[comp_col], errors="coerce")
+	return pd.Series([pd.NaT] * len(df))
+
+def _target_series(df: pd.DataFrame) -> pd.Series:
+	tgt_col = find_col(df, TARGET_DATE_COLS)
+	if tgt_col:
+		return pd.to_datetime(df[tgt_col], errors="coerce")
+	return pd.Series([pd.NaT] * len(df))
+
+def compute_ageing_buckets(df: pd.DataFrame) -> pd.DataFrame:
+	"""Ageing buckets for OPEN WOs based on Reported/Create date.
+	Buckets: 0-7, 8-14, 15-30, 31-60, >60 days.
+	"""
+	open_m = _open_mask(df)
+	if not open_m.any():
+		return pd.DataFrame(columns=["bucket", "count"])
+	reported = _reported_series(df)
+	now_n = pd.Timestamp(now_local_naive())
+	age_days = (now_n - reported[open_m]).dt.total_seconds() / 86400
+	bins = [-1, 7, 14, 30, 60, 10_000]
+	labels = ["0-7", "8-14", "15-30", "31-60", ">60"]
+	cats = pd.cut(age_days, bins=bins, labels=labels)
+	cnt = cats.value_counts().reindex(labels, fill_value=0).reset_index()
+	cnt.columns = ["bucket", "count"]
+	return cnt
+
+def compute_mttr_cm(df: pd.DataFrame) -> Optional[float]:
+	"""Mean Time To Repair for CM only (days)."""
+	wt_col = find_col(df, TYPE_COLS)
+	if wt_col is None:
+		return None
+	wt = df[wt_col].astype(str).str.upper()
+	cm = wt.str.contains("CM", na=False)
+	if not cm.any():
+		return None
+	reported = _reported_series(df)
+	completion = _completion_series(df)
+	valid = cm & reported.notna() & completion.notna()
+	if not valid.any():
+		return None
+	return float((completion[valid] - reported[valid]).dt.total_seconds().mean() / 86400)
+
+def compute_completion_percentiles(df: pd.DataFrame) -> Dict[str, Optional[float]]:
+	"""Return P50/P75/P90 completion time in days across all completed rows."""
+	reported = _reported_series(df)
+	completion = _completion_series(df)
+	valid = reported.notna() & completion.notna()
+	if not valid.any():
+		return {"p50": None, "p75": None, "p90": None}
+	days = (completion[valid] - reported[valid]).dt.total_seconds() / 86400
+	return {"p50": float(days.quantile(0.5)), "p75": float(days.quantile(0.75)), "p90": float(days.quantile(0.9))}
+
+def on_time_by_priority(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+	"""Compute On-Time% per Priority using Target and Completion, if available."""
+	prio_col = find_col(df, PRIORITY_COLS)
+	target = _target_series(df)
+	completion = _completion_series(df)
+	if prio_col is None or target.isna().all() or completion.isna().all():
+		return None
+	valid = target.notna() & completion.notna()
+	if not valid.any():
+		return None
+	tmp = pd.DataFrame({
+		"prio": df[prio_col].astype(str).str.strip(),
+		"on_time": (completion <= target) & valid
+	})
+	grp = tmp.groupby("prio").agg(count=("on_time", "size"), on_time=("on_time", "sum")).reset_index()
+	grp["on_time_rate"] = 100 * grp["on_time"] / grp["count"].replace(0, 1)
+	return grp.sort_values("prio")
+
+def backlog_by_planner(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+	plan_col = find_col(df, PLANNER_COLS)
+	if plan_col is None:
+		return None
+	open_m = _open_mask(df)
+	if not open_m.any():
+		return None
+	grp = (
+		df.loc[open_m, [plan_col]]
+		.assign(cnt=1)
+		.groupby(plan_col)["cnt"].sum()
+		.reset_index(name="count")
+		.sort_values("count", ascending=False)
+	)
+	return grp
+
+def top_assets(df: pd.DataFrame, top_n: int = 15) -> Optional[pd.DataFrame]:
+	asset_col = find_col(df, ["Asset", "ASSET", "asset"]) or ("Asset" if "Asset" in df.columns else None)
+	if not asset_col:
+		return None
+	vc = df[asset_col].astype(str).str.strip().value_counts().head(top_n).reset_index()
+	vc.columns = ["asset", "count"]
+	# drop blanks
+	vc = vc[(vc["asset"].str.len() > 0) & (vc["asset"].str.lower() != "nan")]
+	return vc
+
+
+def generate_recommendations(
+	*,
+	kpis: Dict[str, Any],
+	ins: Dict[str, Any],
+	age_df: pd.DataFrame,
+	mttr_cm: Optional[float],
+	pcts: Dict[str, Any],
+	otp: Optional[pd.DataFrame],
+) -> List[str]:
+	"""Create actionable Arabic recommendations based on thresholds.
+
+	Rules are opinionated but safe; they only trigger when metrics are present.
+	"""
+	recs: List[str] = []
+
+	def _get(k: str) -> Optional[float]:
+		v = kpis.get(k)
+		try:
+			return float(v) if v is not None else None
+		except Exception:
+			return None
+
+	backlog_rate = _get("backlog_rate")
+	completion_rate = _get("completion_rate")
+	on_time = kpis.get("pct_on_time")
+	cm_pm_ratio = _get("cm_pm_ratio")
+	rework_rate = _get("rework_rate")
+
+	# Ageing
+	old_60 = int(age_df.loc[age_df["bucket"].isin([">60"]), "count"].sum()) if isinstance(age_df, pd.DataFrame) and not age_df.empty else 0
+	old_30 = int(age_df.loc[age_df["bucket"].isin(["31-60", ">60"]), "count"].sum()) if isinstance(age_df, pd.DataFrame) and not age_df.empty else 0
+
+	# 1) Backlog and ageing
+	if backlog_rate is not None and backlog_rate > 20:
+		recs.append("معدل التراكم مرتفع (>20%). يُنصح بخطة تخفيض أسبوعية وتحديد أهداف يومية لإغلاق الأعمال المفتوحة.")
+	if old_60 > 0:
+		recs.append("هناك أوامر مفتوحة أقدم من 60 يومًا. أعطها أولوية قصوى وحدد مسؤوليات واضحة لإنجازها.")
+	elif old_30 > 0:
+		recs.append("يوجد عدد ملحوظ من الأعمال المفتوحة لأكثر من 30 يومًا؛ راجع جدولة المواد والاعتمادات.")
+
+	# 2) Completion & On-time
+	if completion_rate is not None and completion_rate < 80:
+		recs.append("معدل الإكمال أقل من 80%. قيّم توزيع الموارد ووقت الاستجابة للموردين.")
+	if on_time is not None and isinstance(on_time, (int, float)) and on_time < 85:
+		recs.append("نسبة الالتزام بالوقت أقل من 85%. راجع تخطيط المدد وحدد قيود المواد/الاعتمادات.")
+
+	# 3) CM vs PM
+	if cm_pm_ratio is not None and cm_pm_ratio > 150:
+		recs.append("هيمنة أعمال CM على PM (نسبة CM/PM > 150%). زد من خطط الصيانة الوقائية لتقليل الأعطال.")
+
+	# 4) Rework
+	if rework_rate is not None and rework_rate > 10:
+		recs.append("معدل إعادة العمل مرتفع (>10%). نفّذ مراجعات جودة وأسباب جذرية وأدرِج دروسًا مستفادة.")
+
+	# 5) MTTR CM
+	if mttr_cm is not None and mttr_cm > 7:
+		recs.append("متوسط زمن الإصلاح لأعمال CM يتجاوز 7 أيام؛ حسّن توافر قطع الغيار وسرّع الموافقات.")
+
+	# 6) Long tail (P90)
+	p90 = pcts.get("p90") if isinstance(pcts, dict) else None
+	try:
+		if p90 is not None and float(p90) > 30:
+			recs.append("%90 من الأعمال يُغلق خلال مدة تتجاوز 30 يومًا. راجع عنق الزجاجة في سلسلة التوريد.")
+	except Exception:
+		pass
+
+	# 7) Priority-specific SLA
+	if isinstance(otp, pd.DataFrame) and not otp.empty:
+		low = otp.sort_values("on_time_rate").iloc[0]
+		try:
+			if float(low["on_time_rate"]) < 80:
+				recs.append(f"الأولوية {low['prio']} تُظهر التزامًا زمنيًا منخفضًا (<80%). ضع مسارًا سريعًا لهذه الفئة.")
+		except Exception:
+			pass
+
+	# 8) PM compliance
+	pmc = ins.get("pm_compliance")
+	try:
+		if pmc is not None and float(pmc) < 95:
+			recs.append("الالتزام بخطط PM أقل من 95%. ثبّت جدول PM وراقب الانحرافات أسبوعيًا.")
+	except Exception:
+		pass
+
+	return recs
 
 
 def insight_card(label: str, value: str, emoji: str) -> None:
@@ -837,34 +1102,40 @@ def _apply_chart_theme(fig, title: str):
 def make_charts(df: pd.DataFrame) -> None:
 	"""Render all charts full-width, stacked vertically for maximum readability."""
 	# Prefer Location over Site when both are present
-	c_location = next((c for c in ["Location", "Site/Location", "Site"] if c in df.columns), None)
-	c_status = next((c for c in ["Status", "STATUS", "status"] if c in df.columns), None)
-	c_planner = next((c for c in ["Planner Name", "Planner"] if c in df.columns), None)
-	c_date = next((c for c in ["Reported Date", "Created Date", "Create Date"] if c in df.columns), None)
-	c_category = next((c for c in ["Work Category", "Category"] if c in df.columns), None)
-	c_type = next((c for c in ["Work Type", "Type", "WORKTYPE", "worktype"] if c in df.columns), None)
+	c_location = find_col(df, LOCATION_COLS)
+	c_status = find_col(df, STATUS_COLS)
+	c_planner = find_col(df, PLANNER_COLS)
+	c_date = find_col(df, DATE_REPORTED_COLS)
+	c_category = find_col(df, CATEGORY_COLS)
+	c_type = find_col(df, TYPE_COLS)
+
+	# Optional diagnostics to understand why some charts show "not sufficient" messages
+	# Debug expander removed per request to hide debug bar in UI.
 
 	# 1) Full-width: Work Orders by Location (aggregated) with count labels and small tick text
 	if c_location:
 		loc_counts = (
 			df.groupby(c_location).size().reset_index(name="count").sort_values("count", ascending=False)
 		)
-		fig_loc = px.bar(
-			loc_counts,
-			x=c_location,
-			y="count",
-			title="Work Orders by Location",
-			text="count",
-			color_discrete_sequence=ORANGE_SEQ,
-			labels={c_location: "Location", "count": "WO count"},
-		)
-		fig_loc.update_traces(texttemplate="%{text}", textposition="outside", cliponaxis=False)
-		fig_loc.update_traces(hovertemplate="Location=%{x}<br>WO count=%{y}<extra></extra>")
-		fig_loc.update_layout(bargap=0.15)
-		fig_loc.update_xaxes(tickangle=-90, tickfont=dict(size=9), categoryorder="total descending")
-		fig_loc = _apply_chart_theme(fig_loc, "Work Orders by Location")
-		fig_loc.update_layout(height=600)
-		st.plotly_chart(fig_loc, use_container_width=True)
+		if loc_counts.empty:
+			st.info("No data available for Location chart.")
+		else:
+			fig_loc = px.bar(
+				loc_counts,
+				x=c_location,
+				y="count",
+				title="Work Orders by Location",
+				text="count",
+				color_discrete_sequence=ORANGE_SEQ,
+				labels={c_location: "Location", "count": "WO count"},
+			)
+			fig_loc.update_traces(texttemplate="%{text}", textposition="outside", cliponaxis=False)
+			fig_loc.update_traces(hovertemplate="Location=%{x}<br>WO count=%{y}<extra></extra>")
+			fig_loc.update_layout(bargap=0.15)
+			fig_loc.update_xaxes(tickangle=-90, tickfont=dict(size=9), categoryorder="total descending")
+			fig_loc = _apply_chart_theme(fig_loc, "Work Orders by Location")
+			fig_loc.update_layout(height=600)
+			st.plotly_chart(fig_loc, use_container_width=True)
 
 		# 1b) Full-width: CM vs PM per Location – grouped bars (all records in sheet)
 		if c_type:
@@ -882,24 +1153,27 @@ def make_charts(df: pd.DataFrame) -> None:
 				counts = df_cmpm.groupby([c_location, "_wt"]).size().reset_index(name="count")
 				# Order locations by total count desc
 				order = counts.groupby(c_location)["count"].sum().sort_values(ascending=False).index.tolist()
-				fig_cmpm = px.bar(
-					counts,
-					x=c_location,
-					y="count",
-					color="_wt",
-					barmode="group",
-					title="CM vs PM per Location",
-					labels={"count": "WO count", "_wt": "Work Type", c_location: "Location"},
-					color_discrete_map={"CM": "#FF6B00", "PM": "#2E86AB"},
-					text="count",
-				)
-				fig_cmpm.update_traces(texttemplate="%{text}", textposition="outside", cliponaxis=False)
-				fig_cmpm.update_traces(hovertemplate="Location=%{x}<br>Work Type=%{legendgroup}<br>WO count=%{y}<extra></extra>")
-				fig_cmpm.update_xaxes(tickangle=-90, tickfont=dict(size=9), categoryorder="array", categoryarray=order)
-				fig_cmpm.update_layout(legend_title_text="Work Type")
-				fig_cmpm = _apply_chart_theme(fig_cmpm, "CM vs PM per Location")
-				fig_cmpm.update_layout(height=650)
-				st.plotly_chart(fig_cmpm, use_container_width=True)
+				if counts.empty:
+					st.info("No CM/PM data for Location breakdown.")
+				else:
+					fig_cmpm = px.bar(
+						counts,
+						x=c_location,
+						y="count",
+						color="_wt",
+						barmode="group",
+						title="CM vs PM per Location",
+						labels={"count": "WO count", "_wt": "Work Type", c_location: "Location"},
+						color_discrete_map={"CM": "#FF6B00", "PM": "#2E86AB"},
+						text="count",
+					)
+					fig_cmpm.update_traces(texttemplate="%{text}", textposition="outside", cliponaxis=False)
+					fig_cmpm.update_traces(hovertemplate="Location=%{x}<br>Work Type=%{legendgroup}<br>WO count=%{y}<extra></extra>")
+					fig_cmpm.update_xaxes(tickangle=-90, tickfont=dict(size=9), categoryorder="array", categoryarray=order)
+					fig_cmpm.update_layout(legend_title_text="Work Type")
+					fig_cmpm = _apply_chart_theme(fig_cmpm, "CM vs PM per Location")
+					fig_cmpm.update_layout(height=650)
+					st.plotly_chart(fig_cmpm, use_container_width=True)
 			else:
 				st.info("No CM/PM completed records available for Location breakdown.")
 		else:
@@ -908,7 +1182,7 @@ def make_charts(df: pd.DataFrame) -> None:
 		st.info("Location column not found.")
 
 	# 8) Full-width: Work Orders by Priority (with small-location labels on bars)
-	c_priority = next((c for c in ["Priority", "PRIORITY", "priority", "PRIORITY CODE", "PRIORITYCODE"] if c in df.columns), None)
+	c_priority = find_col(df, PRIORITY_COLS)
 	if c_priority:
 		prio_str = df[c_priority].astype(str).str.strip()
 		dfp = df.copy()
@@ -940,51 +1214,76 @@ def make_charts(df: pd.DataFrame) -> None:
 		color_map = {p: px.colors.qualitative.Vivid[i % len(px.colors.qualitative.Vivid)] for i, p in enumerate(unique_prios)}
 		color_map["1"] = "#d62728"
 
-		fig_prio = px.bar(
-			counts,
-			x="_prio",
-			y="count",
-			color="_prio",
-			text="locs_text",
-			title="Work Orders by Priority",
-			labels={"_prio": "Priority", "count": "WO count"},
-			color_discrete_map=color_map,
-			custom_data=["locs_text", "count"],
-		)
-		# Place full location list inside the bar, tiny font, vertical for space efficiency
-		fig_prio.update_traces(textposition="inside", textangle=90, insidetextfont=dict(size=7, color="white"), cliponaxis=False)
-		fig_prio.update_traces(hovertemplate="Priority=%{x}<br>WO count=%{y}<br>Locations=%{customdata[0]}<extra></extra>")
-		fig_prio.update_xaxes(categoryorder="array", categoryarray=counts["_prio"].tolist())
-		# Replace tick text with friendly labels (e.g., '1 - Urgent')
-		fig_prio.update_xaxes(tickmode="array", tickvals=counts["_prio"].tolist(), ticktext=counts["prio_label"].tolist())
-		fig_prio.update_layout(legend_title_text="Priority")
-		fig_prio.update_layout(hovermode="closest")
-		fig_prio = _apply_chart_theme(fig_prio, "Work Orders by Priority")
-		fig_prio.update_layout(height=560)
-		st.plotly_chart(fig_prio, use_container_width=True)
+		if counts.empty:
+			st.info("No data available for Priority chart.")
+		else:
+			fig_prio = px.bar(
+				counts,
+				x="_prio",
+				y="count",
+				color="_prio",
+				text="locs_text",
+				title="Work Orders by Priority",
+				labels={"_prio": "Priority", "count": "WO count"},
+				color_discrete_map=color_map,
+				custom_data=["locs_text", "count"],
+			)
+			# Place full location list inside the bar, tiny font, vertical for space efficiency
+			fig_prio.update_traces(textposition="inside", textangle=90, insidetextfont=dict(size=7, color="white"), cliponaxis=False)
+			fig_prio.update_traces(hovertemplate="Priority=%{x}<br>WO count=%{y}<br>Locations=%{customdata[0]}<extra></extra>")
+			fig_prio.update_xaxes(categoryorder="array", categoryarray=counts["_prio"].tolist())
+			# Replace tick text with friendly labels (e.g., '1 - Urgent')
+			fig_prio.update_xaxes(tickmode="array", tickvals=counts["_prio"].tolist(), ticktext=counts["prio_label"].tolist())
+			fig_prio.update_layout(legend_title_text="Priority")
+			fig_prio.update_layout(hovermode="closest")
+			fig_prio = _apply_chart_theme(fig_prio, "Work Orders by Priority")
+			fig_prio.update_layout(height=560)
+			st.plotly_chart(fig_prio, use_container_width=True)
 	else:
 		st.info("Priority column not found.")
 
-	# 2) Full-width: Work Orders by Status (bigger donut to show small slices)
+	# 2) Full-width: Work Orders by Status (donut, group minor categories for clarity)
 	if c_status:
 		# Exclude CAN from status pie if present
-		s = df[c_status].astype(str).str.upper()
+		s = df[c_status].astype(str).str.upper().str.strip()
 		s = s[s != "CAN"]
-		fig = px.pie(s, names=s, title="Work Orders by Status", hole=0.35, color_discrete_sequence=COLOR_SEQ)
-		# Show both count and percent for each slice
-		fig.update_traces(
-			textposition="outside",
-			textinfo="label+value+percent",
-			texttemplate="%{label}: %{value} (%{percent})",
-			textfont_size=16,
-			pull=0,
-		)
-		fig.update_layout(showlegend=True)
-		fig = _apply_chart_theme(fig, "Work Orders by Status")
-		# Extra top margin so outside labels aren't clipped at the top edge
-		fig.update_layout(margin=dict(l=20, r=20, t=180, b=30))
-		fig.update_layout(height=760)
-		st.plotly_chart(fig, use_container_width=True)
+		if s.size == 0:
+			st.info("No data available for Status chart.")
+		else:
+			vc = s.value_counts()
+			df_status = vc.reset_index()
+			df_status.columns = ["status", "count"]
+			# Group small slices into 'OTHER' to declutter labels
+			top_n = 10
+			if len(df_status) > top_n:
+				others_count = int(df_status.loc[top_n:, "count"].sum())
+				df_status = df_status.iloc[:top_n].copy()
+				if others_count > 0:
+					df_status = pd.concat([df_status, pd.DataFrame({"status": ["OTHER"], "count": [others_count]})], ignore_index=True)
+			# Keep legend/order consistent with counts
+			category_order = df_status["status"].tolist()
+			fig = px.pie(
+				df_status,
+				names="status",
+				values="count",
+				title="Work Orders by Status",
+				hole=0.45,
+				color_discrete_sequence=COLOR_SEQ,
+			)
+			fig.update_traces(
+				textposition="inside",
+				textinfo="label+percent",
+				textfont_size=14,
+				hovertemplate="Status=%{label}<br>WO count=%{value} (%{percent})<extra></extra>",
+			)
+			fig.update_layout(showlegend=True)
+			fig.update_layout(legend_title_text="Status")
+			fig.update_layout(margin=dict(l=20, r=20, t=80, b=20))
+			fig.update_layout(height=700)
+			# Order legend to match slice order (highest first)
+			fig.update_traces(sort=False)
+			fig = _apply_chart_theme(fig, "Work Orders by Status")
+			st.plotly_chart(fig, use_container_width=True)
 	else:
 		st.info("Status column not found.")
 
@@ -999,8 +1298,11 @@ def make_charts(df: pd.DataFrame) -> None:
 			all_months = pd.period_range(min_p, max_p, freq="M")
 			full_df = pd.DataFrame({"month": all_months}).merge(cnt, on="month", how="left").fillna({"count": 0})
 			full_df["month_start"] = full_df["month"].dt.to_timestamp()
-			fig = px.line(full_df, x="month_start", y="count", title="Work Orders Over Time", markers=True,
-						  color_discrete_sequence=ORANGE_SEQ)
+			if full_df.empty:
+				st.info("No data available for time series chart.")
+			else:
+				fig = px.line(full_df, x="month_start", y="count", title="Work Orders Over Time", markers=True,
+							  color_discrete_sequence=ORANGE_SEQ)
 			fig.update_xaxes(dtick="M1", tickformat="%b %Y")
 			fig = _apply_chart_theme(fig, "Work Orders Over Time")
 			fig.update_layout(height=500)
@@ -1073,20 +1375,22 @@ def make_charts(df: pd.DataFrame) -> None:
 	else:
 		st.info("Work Type column not found.")
 
-	# 7) Full-width: On-time vs Delayed per month
-	# Build month column from completion date if available else reported
+	# 7) Full-width: On-time vs Delayed per month (use robust column detection)
+	# Build month column from completion date if available else reported/created
 	date_for_month = None
-	if "Completion Date" in df.columns:
-		date_for_month = pd.to_datetime(df["Completion Date"], errors="coerce")
+	comp_col = find_col(df, COMPLETION_DATE_COLS)
+	if comp_col:
+		date_for_month = pd.to_datetime(df[comp_col], errors="coerce")
 	elif c_date:
 		date_for_month = pd.to_datetime(df[c_date], errors="coerce")
 
 	if date_for_month is not None:
 		month = date_for_month.dt.to_period("M").astype(str)
-		# On-time/Delayed only when both Target and Completion available
-		target = pd.to_datetime(df.get("Target Date"), errors="coerce") if "Target Date" in df.columns else None
-		if target is not None and "Completion Date" in df.columns:
-			completion = pd.to_datetime(df["Completion Date"], errors="coerce")
+		# On-time/Delayed only when both Target and Completion available (with synonyms)
+		tgt_col = find_col(df, TARGET_DATE_COLS)
+		if tgt_col is not None and comp_col is not None:
+			target = pd.to_datetime(df[tgt_col], errors="coerce")
+			completion = pd.to_datetime(df[comp_col], errors="coerce")
 			on_time = (completion.notna() & target.notna() & (completion <= target))
 			delayed = (completion.notna() & target.notna() & (completion > target))
 			dt = pd.DataFrame({"month": month, "On Time": on_time.astype(int), "Delayed": delayed.astype(int)})
@@ -1110,38 +1414,177 @@ def make_charts(df: pd.DataFrame) -> None:
 		else:
 			st.info("Target/Completion dates not sufficient for on-time analysis.")
 
-		# Completed MoM trend (COMP or CLOSE) with all months shown (including zero-count months)
+		# Completed MoM trend (COMP or CLOSE) with robust date fallback and all months shown
 		if c_status is not None:
-			status_u = df[c_status].astype(str).str.upper()
-			valid_dates = date_for_month.notna()
-			if valid_dates.any():
-				is_done = status_u.isin(["COMP", "CLOSE"]) & valid_dates
-				# Work with Period[M] to build a full continuous monthly range
-				month_period = date_for_month.dt.to_period("M")
-				done_months = month_period[is_done]
-				cnt = done_months.value_counts().rename_axis("month").reset_index(name="count") if is_done.any() else pd.DataFrame({"month": [], "count": []})
+			status_u = df[c_status].astype(str).str.upper().str.strip()
+			is_done = status_u.isin(DONE_STATUS_VALUES) if not status_u.empty else pd.Series([False] * len(df))
 
-				# Build full month range from min to max available dates
-				min_p = month_period[valid_dates].min()
-				max_p = month_period[valid_dates].max()
-				if pd.isna(min_p) or pd.isna(max_p):
-					st.info("No valid dates for monthly completion trend.")
-				else:
-					all_months = pd.period_range(min_p, max_p, freq="M")
-					full_df = pd.DataFrame({"month": all_months}).merge(cnt, on="month", how="left").fillna({"count": 0})
-					# Use month start as datetime for clean date axis; force monthly ticks
-					full_df["month_start"] = full_df["month"].dt.to_timestamp()
-					fig2 = px.line(full_df, x="month_start", y="count", markers=True, color_discrete_sequence=ORANGE_SEQ, title="Completed Orders per Month")
-					fig2.update_xaxes(dtick="M1", tickformat="%b %Y")
-					fig2 = _apply_chart_theme(fig2, "Completed Orders per Month")
-					fig2.update_layout(height=480)
-					st.plotly_chart(fig2, use_container_width=True)
-			else:
+			# Build a best-available date for done rows: prefer Completion, then Status Date, Change Date, then Reported/Create
+			date_candidates = []
+			comp_col = find_col(df, COMPLETION_DATE_COLS)
+			if comp_col: date_candidates.append(comp_col)
+			# Additional potential date columns often present
+			for dc in ["Status Date", "Last Modified", "Change Date"]:
+				col = find_col(df, [dc])
+				if col and col not in date_candidates:
+					date_candidates.append(col)
+			rep_col = find_col(df, DATE_REPORTED_COLS)
+			if rep_col and rep_col not in date_candidates:
+				date_candidates.append(rep_col)
+
+			if not date_candidates:
 				st.info("No valid dates for monthly completion trend.")
+				st.caption("Tip: add one of these columns for done rows: Completion Date, Close Date, Status Date, Change Date, Reported/Create Date.")
+			else:
+				series = None
+				for col in date_candidates:
+					cur = pd.to_datetime(df[col], errors="coerce")
+					series = cur if series is None else series.fillna(cur)
+				if series is None:
+					st.info("No valid dates for monthly completion trend.")
+					# Show coverage per candidate to help diagnose
+					try:
+						cnts = []
+						for col in date_candidates:
+							cnts.append(f"{col}: {int(pd.to_datetime(df[col], errors='coerce').notna().sum())}")
+						st.caption("Date coverage → " + " | ".join(cnts))
+					except Exception:
+						pass
+				else:
+					done_dates = series[is_done]
+					done_dates = done_dates[done_dates.notna()]
+					if done_dates.empty:
+						st.info("No valid dates for monthly completion trend.")
+						try:
+							cnts = []
+							for col in date_candidates:
+								ser = pd.to_datetime(df[col], errors='coerce')
+								cnts.append(f"{col}: {int(ser[is_done].notna().sum())} for done rows")
+							st.caption("Date coverage (done only) → " + " | ".join(cnts))
+						except Exception:
+							pass
+					else:
+						month_period = done_dates.dt.to_period("M")
+						cnt = month_period.value_counts().rename_axis("month").reset_index(name="count").sort_values("month")
+						# Full range from min to max months across the chosen series
+						min_p = month_period.min()
+						max_p = month_period.max()
+						all_months = pd.period_range(min_p, max_p, freq="M")
+						full_df = pd.DataFrame({"month": all_months}).merge(cnt, on="month", how="left").fillna({"count": 0})
+						full_df["month_start"] = full_df["month"].dt.to_timestamp()
+						fig2 = px.line(full_df, x="month_start", y="count", markers=True, color_discrete_sequence=ORANGE_SEQ, title="Completed Orders per Month")
+						fig2.update_xaxes(dtick="M1", tickformat="%b %Y")
+						fig2 = _apply_chart_theme(fig2, "Completed Orders per Month")
+						fig2.update_layout(height=480)
+						st.plotly_chart(fig2, use_container_width=True)
+
+			# Rework (QREJECTC) trend per month if possible
+			rej_mask = status_u.eq("QREJECTC") if c_status is not None else pd.Series([False] * len(df))
+			if rej_mask.any():
+				# pick best date available (Completion/Status/Reported)
+				cands = []
+				col = find_col(df, COMPLETION_DATE_COLS)
+				if col: cands.append(col)
+				for dc in ["Status Date", "Change Date", "Reported Date", "Create Date", "Created Date"]:
+					c = find_col(df, [dc])
+					if c and c not in cands: cands.append(c)
+				ser = None
+				for c in cands:
+					cur = pd.to_datetime(df[c], errors="coerce")
+					ser = cur if ser is None else ser.fillna(cur)
+				if ser is not None:
+					m = ser[rej_mask].dt.to_period("M")
+					cnt = m.value_counts().rename_axis("month").reset_index(name="count").sort_values("month")
+					if not cnt.empty:
+						full = pd.DataFrame({"month": pd.period_range(m.min(), m.max(), freq="M")}).merge(cnt, on="month", how="left").fillna({"count":0})
+						full["month_start"] = full["month"].dt.to_timestamp()
+						figr = px.line(full, x="month_start", y="count", markers=True, color_discrete_sequence=["#d62728"], title="Rework (QREJECTC) per Month")
+						figr.update_xaxes(dtick="M1", tickformat="%b %Y")
+						figr = _apply_chart_theme(figr, "Rework (QREJECTC) per Month")
+						figr.update_layout(height=420)
+						st.plotly_chart(figr, use_container_width=True)
 		else:
 			st.info("Status column not found for monthly completion trend.")
 	else:
 		st.info("No suitable date column for monthly trends.")
+
+	# 9) Full-width: Ageing buckets for OPEN backlog
+	age = compute_ageing_buckets(df)
+	if not age.empty:
+		fig_age = px.bar(
+			age,
+			x="bucket",
+			y="count",
+			title="Backlog Ageing (Open WOs)",
+			labels={"bucket": "Age (days)", "count": "WO count"},
+			color_discrete_sequence=ORANGE_SEQ,
+			text="count",
+		)
+		fig_age.update_traces(textposition="outside", cliponaxis=False)
+		fig_age = _apply_chart_theme(fig_age, "Backlog Ageing (Open WOs)")
+		fig_age.update_layout(height=480)
+		st.plotly_chart(fig_age, use_container_width=True)
+	else:
+		st.info("No open backlog to compute ageing.")
+
+	# 10) Full-width: On-Time rate by Priority (if Target/Completion available)
+	otp = on_time_by_priority(df)
+	if otp is not None and not otp.empty:
+		fig_otp = px.bar(
+			otp,
+			x="prio",
+			y="on_time_rate",
+			title="On-Time % by Priority",
+			labels={"prio": "Priority", "on_time_rate": "On-Time %"},
+			text=(otp["on_time_rate"].round(0).astype(int).astype(str) + "%"),
+			color_discrete_sequence=ORANGE_SEQ,
+		)
+		fig_otp.update_traces(textposition="outside", cliponaxis=False)
+		fig_otp = _apply_chart_theme(fig_otp, "On-Time % by Priority")
+		fig_otp.update_layout(height=480)
+		st.plotly_chart(fig_otp, use_container_width=True)
+	else:
+		st.info("Target/Completion+Priority not sufficient for on-time by priority.")
+
+	# 11) Full-width: Backlog by Planner (open items)
+	bp = backlog_by_planner(df)
+	if bp is not None and not bp.empty:
+		fig_bp = px.bar(
+			bp,
+			x=bp.columns[0],
+			y="count",
+			title="Open Backlog by Planner",
+			labels={bp.columns[0]: "Planner", "count": "Open WO count"},
+			text="count",
+			color_discrete_sequence=ORANGE_SEQ,
+		)
+		fig_bp.update_traces(textposition="outside", cliponaxis=False)
+		fig_bp.update_xaxes(tickangle=-45, tickfont=dict(size=10), categoryorder="total descending")
+		fig_bp = _apply_chart_theme(fig_bp, "Open Backlog by Planner")
+		fig_bp.update_layout(height=520)
+		st.plotly_chart(fig_bp, use_container_width=True)
+	else:
+		st.info("Planner column not sufficient for backlog by planner.")
+
+	# 12) Full-width: Top Assets by WO volume
+	assets = top_assets(df)
+	if assets is not None and not assets.empty:
+		fig_as = px.bar(
+			assets,
+			x="asset",
+			y="count",
+			title="Top Assets by Work Orders",
+			labels={"asset": "Asset", "count": "WO count"},
+			text="count",
+			color_discrete_sequence=COLOR_SEQ,
+		)
+		fig_as.update_traces(textposition="outside", cliponaxis=False)
+		fig_as.update_xaxes(tickangle=-45, tickfont=dict(size=10), categoryorder="total descending")
+		fig_as = _apply_chart_theme(fig_as, "Top Assets by Work Orders")
+		fig_as.update_layout(height=520)
+		st.plotly_chart(fig_as, use_container_width=True)
+	else:
+		st.info("Asset column not found for Top Assets chart.")
 
 
 # -------------------------
@@ -1332,18 +1775,23 @@ def page_kpis(df: pd.DataFrame, updated_at: Optional[datetime]) -> None:
 	# Compute core metrics
 	kpis = compute_kpis(df)
 	ins = compute_insights(df)
+	# Advanced metrics
+	age_df = compute_ageing_buckets(df)
+	mttr_cm_val = compute_mttr_cm(df)
+	pcts = compute_completion_percentiles(df)
+	otp = on_time_by_priority(df)
 
 	# Brand-aware KPI UI
 	inject_perf_kpi_css("#FFA500")
 
 	# Map metrics to modern sections
 	overall = [
-		{"key":"", "label":"Total WOs",   "value": kpis.get("total"),     "unit":"int", "icon":"🧰", "tip":"Total work orders in scope after exclusions."},
-		{"key":"", "label":"Open Orders", "value": kpis.get("open"),      "unit":"int", "icon":"📂", "tip":"Currently open work orders."},
-		{"key":"", "label":"Completed",   "value": kpis.get("completed"), "unit":"int", "icon":"✅", "tip":"Completed (may include closed)."},
-		{"key":"", "label":"Closed",      "value": kpis.get("closed"),    "unit":"int", "icon":"📦", "tip":"Fully closed WOs."},
-		{"key":"", "label":"Rejected",    "value": kpis.get("rejected"),  "unit":"int", "icon":"❌", "tip":"Rejected/voided after QC."},
-	]
+			{"key":"", "label":"Total WOs",   "value": kpis.get("total"),     "unit":"int", "icon":"🧰", "tip":"Total work orders in scope after exclusions."},
+			{"key":"", "label":"Open Orders", "value": kpis.get("open"),      "unit":"int", "icon":"📂", "tip":"Currently open work orders."},
+			{"key":"", "label":"Completed",   "value": kpis.get("completed"), "unit":"int", "icon":"✅", "tip":"Completed (Status = COMP only)."},
+			{"key":"", "label":"Closed",      "value": kpis.get("closed"),    "unit":"int", "icon":"📦", "tip":"Fully closed WOs (Status = CLOSE)."},
+			{"key":"", "label":"Rejected",    "value": kpis.get("rejected"),  "unit":"int", "icon":"❌", "tip":"Rejected/voided after QC."},
+		]
 	render_kpi_section(
 		"Overall Performance",
 		overall,
@@ -1405,6 +1853,44 @@ def page_kpis(df: pd.DataFrame, updated_at: Optional[datetime]) -> None:
 		 "tip":"On-time PMs / scheduled PMs; target ≥ 95%."},
 	]
 	render_kpi_section("Operational Quality (Svc)", svc_ops)
+
+	# Cycle times
+	cycle = [
+		{"key":"", "label":"P50 Completion", "value": pcts.get("p50"), "unit":"d", "icon":"📉", "tip":"Median (50th percentile) completion time."},
+		{"key":"", "label":"P75 Completion", "value": pcts.get("p75"), "unit":"d", "icon":"📈", "tip":"75th percentile completion time."},
+		{"key":"", "label":"P90 Completion", "value": pcts.get("p90"), "unit":"d", "icon":"📈", "tip":"90th percentile completion time."},
+		{"key":"", "label":"MTTR (CM)", "value": mttr_cm_val, "unit":"d", "icon":"🛠️", "tip":"Mean time to repair for Corrective Maintenance only."},
+	]
+	render_kpi_section("Cycle Times", cycle)
+
+	# Backlog ageing highlights
+	old_30 = int(age_df.loc[age_df["bucket"].isin(["31-60", ">60"]), "count"].sum()) if not age_df.empty else 0
+	old_60 = int(age_df.loc[age_df["bucket"].isin([">60"]), "count"].sum()) if not age_df.empty else 0
+	age_cards = [
+		{"key":"", "label":">= 31d Open", "value": old_30, "unit":"int", "icon":"⏳", "tip":"Open WOs older than 30 days."},
+		{"key":"", "label":">= 60d Open", "value": old_60, "unit":"int", "icon":"⌛", "tip":"Open WOs older than 60 days."},
+	]
+	render_kpi_section("Backlog Ageing Highlights", age_cards)
+
+	# SLA by Priority (summary)
+	if otp is not None and not otp.empty:
+		worst = otp.sort_values("on_time_rate").iloc[0]
+		best = otp.sort_values("on_time_rate").iloc[-1]
+		sla_pr = [
+			{"key":"on_time_rate", "label":f"Best Priority ({best['prio']})", "value": float(best["on_time_rate"]), "unit":"%", "icon":"🏆", "tip":"Highest on-time rate by priority."},
+			{"key":"on_time_rate", "label":f"Worst Priority ({worst['prio']})", "value": float(worst["on_time_rate"]), "unit":"%", "icon":"⚠️", "tip":"Lowest on-time rate by priority."},
+		]
+		render_kpi_section("SLA by Priority (Summary)", sla_pr)
+
+	# Recommendations based on KPIs
+	st.markdown("---")
+	st.subheader("Recommendations")
+	recs = generate_recommendations(kpis=kpis, ins=ins, age_df=age_df, mttr_cm=mttr_cm_val, pcts=pcts, otp=otp)
+	if not recs:
+		st.success("No critical issues detected. Keep monitoring KPIs.")
+	else:
+		for r in recs:
+			st.write("- ", r)
 
 	# On-time completion rate per Location (Service Level per Location)
 	st.markdown("---")
@@ -1469,12 +1955,14 @@ def main() -> None:
 	df: Optional[pd.DataFrame] = None
 	updated_at: Optional[datetime] = None
 	error = None
+
+	# File upload option removed per request; data loads only from configured FIXED_DATA_URL.
 	data_url = FIXED_DATA_URL
-	if (not data_url) or ("example.com" in str(data_url)):
+	if df is None and ((not data_url) or ("example.com" in str(data_url))):
 		error = "No fixed data URL configured."
-	else:
+	elif df is None:
 		try:
-			with st.spinner("👉 Importing data from MAXIMO..."):
+			with st.spinner("👉 Importing data from MAXIMO-ARSAL..."):
 				df, updated_at = load_data(data_url)
 		except KeyboardInterrupt:
 			error = "Data loading interrupted by user."
