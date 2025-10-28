@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 Arsal Facility Management – MMC Dashboard (single-file Streamlit)
 
@@ -3033,5 +3032,3 @@ def main() -> None:
 
 if __name__ == "__main__":
 	main()
-
->>>>>>> b07c0ca7a5d68bfc1768c2a4a8b25522624d84a3
