@@ -1,29 +1,24 @@
-# Streamlit
+# Core dashboard
 streamlit==1.28.0
 
-# Data manipulation
-pandas>=2.1
+# Data processing
+pandas>=2.3.3
 numpy>=1.26
-
-# Excel support
+python-dateutil>=2.9.3  # تم التحديث لتوافق Python 3.13
 openpyxl==3.1.0
 
 # Visualization
-plotly==5.16.0
 matplotlib==3.8.0
+plotly==5.16.0
 seaborn>=0.13
 
-# Web requests
+# Web/API
 requests==2.31.0
-
-# Google Sheets integration
 gspread==5.9.0
 oauth2client==4.1.3
 
-# Utilities
-python-dateutil==2.9.2
-pytz==2025.10
-rich<14
-markdown-it-py==4.0.0
-mdurl==0.1.2
-pyyaml==6.0
+# Utility
+rich>=10.14.0,<14
+markdown-it-py>=4.0.0
+pygments>=2.19.2,<3
+mdurl~=0.1
