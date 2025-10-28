@@ -46,8 +46,9 @@ ACCENT = "#333333"       # Charcoal Gray
 TEXT = "#000000"         # Black
 
 # Brand assets (direct view links)
-arsal_logo_url = "https://drive.google.com/uc?export=view&id=1lAmXKLuyFH0IS840z7PoecsU_eYSsloh"
-client_logo_url = "https://drive.google.com/uc?export=view&id=1XHP8Str5Iwt9YinIgfisG6xTnOM222Py"
+# Default logo URLs (use raw GitHub links for direct image serving)
+arsal_logo_url = "https://raw.githubusercontent.com/engehabreda2194/MMC_Dash03/17a50cdb1bafd2cd11839c24b0f2a65ec7509b22/ARSAL%20Logo.png"
+client_logo_url = "https://raw.githubusercontent.com/engehabreda2194/MMC_Dash03/17a50cdb1bafd2cd11839c24b0f2a65ec7509b22/MMC%20Logo.jpg"
 def get_secret_env(key: str, default: Optional[str] = None) -> Optional[str]:
 	"""Read a config value from st.secrets first, then environment variables.
 
